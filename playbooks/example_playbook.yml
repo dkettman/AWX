@@ -1,0 +1,113 @@
+- hosts: localhost
+  gather_facts: False
+
+  tasks:
+
+    - name: Provision a set of instances
+      ec2:
+        region: us-east-1
+        key_name: BasicKeypair
+        group: default
+        instance_type: t2.micro
+        image: "ami-00068cd7555f543d5"
+        wait: true
+        exact_count: 5
+        count_tag:
+          Name: "{{ tag_name }}"
+        instance_tags:
+          Name: "{{ tag_name }}"
+      register: ec2
+
+    - name: Add all instance public IPs to host group
+      add_host: hostname={{ item.public_ip }} groups=ec2hosts
+      loop: "{{ ec2.instances }}"
+
+    - name: Waiting for spinup
+      wait_for:
+        timeout: 30
+  
+- hosts: ec2hosts
+  name: configuation play
+  user: ec2-user
+  gather_facts: true
+
+  tasks:
+    - name: Install Centrify Cloud Agent
+      yum:
+        pkg: https://edge.centrify.com/products/cloud-service/CliDownload/Centrify/CentrifyCC-rhel6.x86_64.rpm
+        state: present
+      become: yes
+
+    - name: Check if already enrolled in Centrify Cloud
+      shell: /usr/bin/cinfo
+      ignore_errors: yes
+      register: cloud_info
+
+    - name: Enroll in Centrify Cloud
+      become: yes
+      shell: /usr/sbin/cenroll -a "{{ inventory_hostname }}" -c "_OWVOTXVML94PJ--NKUSG5WNS-S07JVAGY8SNOTCPSA1" -t https://dkettmann.my.centrify.net -F all
+      when: cloud_info.rc == 10
+
+    - name: Create local user
+      become: yes
+      user: 
+        name: centrify
+        password: "$6$kXJKOG66SAxV8f2M$QT29rXpJe.lVCIZxkvijniGdBWAMMdBJBiRW6ImIM5utHX4G1UDPKJaBtSzrVD0htrT2MV.leqcCge.q/UCt71"
+
+    - name: Create .ssh directory
+      become: yes
+      file: 
+        path: /home/centrify/.ssh
+        state: directory
+        mode: 0700
+        owner: centrify
+        group: centrify
+
+    - name: Copy Public Key
+      become: yes
+      copy: 
+        src: ~/.ssh/id_rsa.pub
+        dest: /home/centrify/.ssh/authorized_heys
+        mode: 0644
+
+    - name: Copy Use My Account Key
+      become: yes
+      copy:
+        src: ~/ansible/aws_lab/ca.pub
+        dest: /etc/ssh/centrify_tenant_ca.pub
+
+    - name: Allow password for login
+      become: yes
+      lineinfile: 
+        path: /etc/ssh/sshd_config
+        regex: "PasswordAuthentication no"
+        line: "#PasswordAuthentication no"
+
+    - name: Create sudoers.d file
+      become: yes
+      file:
+        path: /etc/sudoers.d/unixadmin
+        mode: 0440
+        owner: root
+        group: root
+        state: touch
+
+    - name: Sudoers.d file
+      become: yes
+      lineinfile:
+        path: /etc/sudoers.d/unixadmin
+        regex: .*
+        line: "%UNIXAdmin ALL=(ALL) NOPASSWD:ALL"
+
+    - name: Enable UseMyAccount
+      become: yes
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        line: "TrustedUserCAKeys /etc/ssh/centrify_tenant_ca.pub"
+
+    - name: Restart SSH
+      become: yes
+      service:
+        name: sshd
+        state: restarted
+
